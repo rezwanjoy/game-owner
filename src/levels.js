@@ -11,16 +11,39 @@ const TABLE = [
   { colors: 2, groups: 2, lanes: 3, capacity: 8, need: 1, noise: 2, sleepy: 0, speed: 200, tip: 'Tap a critter to put it on the belt.\nIt hops into the bus of its color!' },
   { colors: 3, groups: 2, lanes: 3, capacity: 8, need: 2, noise: 3, sleepy: 0, speed: 200, tip: 'Watch the "Next" buses at the top\nand plan ahead!' },
   { colors: 3, groups: 3, lanes: 4, capacity: 7, need: 2, noise: 4, sleepy: 0, speed: 210, tip: "Don't let the belt fill up,\nor it jams!" },
-  { colors: 4, groups: 2, lanes: 4, capacity: 7, need: 3, noise: 4, sleepy: 0, speed: 210 },
+  { colors: 4, groups: 2, lanes: 4, capacity: 7, need: 3, noise: 4, sleepy: 0, speed: 210, tip: 'Stuck? Use a booster!\n➕ adds a belt slot\n✋ grabs any critter' },
   { colors: 4, groups: 3, lanes: 4, capacity: 7, need: 3, noise: 5, sleepy: 0, speed: 220 },
   { colors: 4, groups: 3, lanes: 4, capacity: 7, need: 3, noise: 5, sleepy: 0.3, speed: 220, tip: 'Sleepy critters wake up\nwhen they reach the front!' },
   { colors: 5, groups: 3, lanes: 5, capacity: 7, need: 4, noise: 6, sleepy: 0.15, speed: 230 },
   { colors: 5, groups: 3, lanes: 5, capacity: 7, need: 4, noise: 6, sleepy: 0.3, speed: 230 },
   { colors: 6, groups: 3, lanes: 5, capacity: 8, need: 5, noise: 7, sleepy: 0.3, speed: 240 },
-  { colors: 6, groups: 3, lanes: 5, capacity: 7, need: 5, noise: 7, sleepy: 0.35, speed: 240 },
+  { colors: 6, groups: 3, lanes: 5, capacity: 7, need: 5, noise: 7, sleepy: 0.35, speed: 240, hard: true },
 ];
 
-export const LEVEL_COUNT = TABLE.length;
+export const LEVEL_COUNT = 50;
+
+// Levels past the hand-tuned table ramp up colors, sleepiness and speed.
+// Every 5th level is a "hard" level with a tighter belt.
+function params(n) {
+  if (n <= TABLE.length) return TABLE[n - 1];
+  const hard = n % 5 === 0;
+  const colors = n <= 20 ? 6 : n <= 30 ? 7 : 8;
+  return {
+    colors,
+    groups: 3,
+    lanes: colors >= 8 ? 6 : 5,
+    capacity: hard ? 7 : 8,
+    need: hard ? 6 : 5,
+    noise: 7,
+    sleepy: Math.min(0.45, 0.3 + (n - 10) * 0.004),
+    speed: Math.min(270, 240 + (n - 10)),
+    hard,
+  };
+}
+
+export function isHard(n) {
+  return !!params(n).hard;
+}
 
 function mulberry32(seed) {
   return () => {
@@ -102,7 +125,7 @@ const cache = new Map();
 
 export function getLevel(n) {
   if (cache.has(n)) return cache.get(n);
-  const p = TABLE[Math.min(n, LEVEL_COUNT) - 1];
+  const p = params(Math.min(n, LEVEL_COUNT));
   let level = null;
   for (let attempt = 0; attempt < 2000 && !level; attempt++) {
     const candidate = generate(p, mulberry32(n * 7919 + attempt), p.noise);
@@ -110,7 +133,7 @@ export function getLevel(n) {
     if (solve(candidate, p.capacity - 1) && !solve(candidate, p.need - 1)) level = candidate;
   }
   if (!level) throw new Error(`Could not generate level ${n}`);
-  const result = { ...level, number: n, capacity: p.capacity, speed: p.speed, tip: p.tip || null };
+  const result = { ...level, number: n, capacity: p.capacity, speed: p.speed, tip: p.tip || null, hard: !!p.hard };
   cache.set(n, result);
   return result;
 }

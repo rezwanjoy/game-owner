@@ -1,9 +1,10 @@
 import Phaser from 'phaser';
-import { GAME_W, GAME_H, textStyle, drawBackground, makeButton } from '../layout.js';
-import { COLORS, critterKey, shade } from '../art.js';
+import { GAME_W, GAME_H, textStyle, drawBackground, iconButton, showPanel, addToggles } from '../layout.js';
+import { COLORS, critterKey, sleepKey, shade } from '../art.js';
 import { getLevel, LEVEL_COUNT, DOCK_COUNT } from '../levels.js';
 import { loadSave, writeSave } from '../save.js';
-import { sfx } from '../sfx.js';
+import { sfx, music, haptics } from '../sfx.js';
+import { ads } from '../ads.js';
 
 // Belt is a stadium-shaped loop; critters ride it clockwise.
 const BELT = { x1: 200, x2: 520, cy: 500, r: 116 };
@@ -17,13 +18,23 @@ const DOCK_Y = 236;
 const DOCK_XS = [160, 360, 560];
 const SEATS = 3;
 
-const LANE_TOP = 770;
-const ROW_H = 92;
-const MAX_ROWS = 5;
+const LANE_TOP = 762;
+const ROW_H = 90;
+const MAX_ROWS = 4;
 
 const LANE_SCALE = 0.82;
 const BELT_SCALE = 0.72;
 const SEAT_SCALE = 0.5;
+
+const BOOSTER_Y = 1196;
+const BOOSTER_LEVEL = 3;
+const BOOSTER_PRICE = 40;
+const MAX_EXTRA_SLOTS = 3;
+const BOOSTERS = [
+  { id: 'slot', icon: '➕', name: 'Extra Slot', desc: 'Adds one slot\nto the belt.' },
+  { id: 'wake', icon: '☀️', name: 'Wake Up', desc: 'Wakes up every\nsleepy critter.' },
+  { id: 'grab', icon: '✋', name: 'Grab', desc: 'Send any critter,\nnot just the front one.' },
+];
 
 function beltPoint(d) {
   d = ((d % PERIM) + PERIM) % PERIM;
@@ -47,14 +58,17 @@ export class GameScene extends Phaser.Scene {
   create(data) {
     this.levelNum = data.level || 1;
     this.lv = getLevel(this.levelNum);
-    this.state = 'playing';
     this.offset = 0;
     this.homesDone = 0;
-    this.usedExtraSlots = false;
+    this.peak = 0;
+    this.extraSlots = 0;
+    this.usedRescue = false;
     this.wasDanger = false;
+    this.grabMode = false;
     this.previewG = null;
-    this.tip = null;
     this.panel = null;
+    this.hand = null;
+    this.state = 'intro';
 
     drawBackground(this);
     this.beltG = this.add.graphics();
@@ -66,33 +80,48 @@ export class GameScene extends Phaser.Scene {
 
     this.buildLanes();
     this.buildHud();
+    if (this.levelNum >= BOOSTER_LEVEL) this.buildBoosters();
 
     this.confetti = this.add.particles(0, 0, 'confetti', {
       speed: { min: 250, max: 650 }, angle: { min: 200, max: 340 }, gravityY: 900,
       lifespan: 1400, rotate: { min: 0, max: 360 }, scale: { start: 1.2, end: 0.6 },
       tint: COLORS, emitting: false,
-    }).setDepth(50);
+    }).setDepth(150);
     this.puffs = this.add.particles(0, 0, 'dot', {
       speed: { min: 80, max: 220 }, lifespan: 450, scale: { start: 0.9, end: 0 }, alpha: { start: 0.9, end: 0 }, emitting: false,
     }).setDepth(40);
 
     this.input.on('pointerdown', this.onPointer, this);
+    this.events.once('shutdown', () => ads.gameplayStop());
 
-    if (this.lv.tip) this.showTip(this.lv.tip);
+    if (this.lv.tip) {
+      this.panel = showPanel(this, {
+        title: this.levelNum === 1 ? 'How to play' : 'Tip',
+        subtitle: this.lv.tip,
+        buttons: [["Let's go!", () => this.begin(), 0x6fdc7a]],
+      });
+    } else {
+      this.time.delayedCall(450, () => this.begin());
+    }
+  }
+
+  begin() {
+    this.closePanel();
+    this.state = 'playing';
+    ads.gameplayStart();
+    if (this.lv.hard) this.banner('Hard level!', '#ff5d5d');
+    if (this.levelNum === 1) this.showHand();
   }
 
   // ---------- Layout pieces ----------
 
   buildHud() {
-    this.add.text(36, 34, `Level ${this.levelNum}`, textStyle(40)).setDepth(60);
-    const home = this.add.text(GAME_W - 36, 30, '🏠', { fontSize: '48px' }).setOrigin(1, 0).setDepth(60).setInteractive({ useHandCursor: true });
-    home.on('pointerup', () => this.scene.start('Menu'));
-    const retry = this.add.text(GAME_W - 116, 30, '🔄', { fontSize: '48px' }).setOrigin(1, 0).setDepth(60).setInteractive({ useHandCursor: true });
-    retry.on('pointerup', () => this.scene.restart({ level: this.levelNum }));
+    this.add.text(36, 50, `Level ${this.levelNum}`, textStyle(40, this.lv.hard ? '#ff5d5d' : '#ffffff')).setOrigin(0, 0.5).setDepth(60);
+    iconButton(this, GAME_W - 66, 54, '⏸️', () => this.pause(), { size: 84 }).setDepth(60);
 
-    this.add.text(36, 112, 'Next', textStyle(28, '#ffffff')).setOrigin(0, 0.5);
+    this.add.text(36, 118, 'Next', textStyle(28, '#ffffff')).setOrigin(0, 0.5);
     this.previewG = this.add.graphics();
-    this.progressText = this.add.text(GAME_W - 36, 112, '', textStyle(28)).setOrigin(1, 0.5);
+    this.progressText = this.add.text(GAME_W - 36, 118, '', textStyle(28)).setOrigin(1, 0.5);
 
     this.beltLabel = this.add.text(GAME_W / 2, BELT.cy - 14, '', textStyle(44, '#ffffff')).setOrigin(0.5).setDepth(5);
     this.beltSub = this.add.text(GAME_W / 2, BELT.cy + 32, 'on belt', textStyle(24, '#ffffff', '#6b3a6b', 4)).setOrigin(0.5).setDepth(5);
@@ -103,24 +132,24 @@ export class GameScene extends Phaser.Scene {
     const g = this.previewG.clear();
     this.homeQueue.slice(0, 6).forEach((c, i) => {
       const x = 130 + i * 52;
-      g.fillStyle(shade(COLORS[c], -0.35)).fillCircle(x, 114, 19);
-      g.fillStyle(COLORS[c]).fillCircle(x, 112, 17);
+      g.fillStyle(shade(COLORS[c], -0.35)).fillCircle(x, 120, 19);
+      g.fillStyle(COLORS[c]).fillCircle(x, 118, 17);
     });
-    if (this.homeQueue.length > 6) g.fillStyle(0xffffff, 0.8).fillCircle(130 + 6 * 52, 112, 6);
+    if (this.homeQueue.length > 6) g.fillStyle(0xffffff, 0.8).fillCircle(130 + 6 * 52, 118, 6);
     this.progressText.setText(`${this.homesDone}/${this.lv.homes.length} 🚌`);
   }
 
   buildLanes() {
     const n = this.lv.lanes.length;
-    const spacing = Math.min(150, 640 / n);
+    const spacing = Math.min(150, 660 / n);
     this.laneSpacing = spacing;
     this.laneXs = Array.from({ length: n }, (_, i) => GAME_W / 2 + (i - (n - 1) / 2) * spacing);
     const g = this.add.graphics();
     this.laneXs.forEach((x) => {
-      g.fillStyle(0xffffff, 0.45).fillRoundedRect(x - spacing / 2 + 8, LANE_TOP - 56, spacing - 16, MAX_ROWS * ROW_H + 70, 34);
+      g.fillStyle(0xffffff, 0.45).fillRoundedRect(x - spacing / 2 + 6, LANE_TOP - 56, spacing - 12, MAX_ROWS * ROW_H + 64, 32);
     });
     this.lanes = this.lv.lanes.map((lane) => lane.map((c) => ({ color: c.color, sleepy: c.sleepy, sprite: null })));
-    this.laneBadges = this.laneXs.map((x) => this.add.text(x, LANE_TOP + MAX_ROWS * ROW_H + 26, '', textStyle(30)).setOrigin(0.5));
+    this.laneBadges = this.laneXs.map((x) => this.add.text(x, LANE_TOP + MAX_ROWS * ROW_H - 22, '', textStyle(28)).setOrigin(0.5));
     this.lanes.forEach((_, l) => this.refreshLane(l, false));
   }
 
@@ -128,14 +157,11 @@ export class GameScene extends Phaser.Scene {
     const lane = this.lanes[l];
     lane.forEach((c, r) => {
       if (r >= MAX_ROWS) return;
-      if (r === 0 && c.sleepy) {
-        c.sleepy = false;
-        if (c.sprite) { c.sprite.setTexture(critterKey(c.color)); this.squash(c.sprite, LANE_SCALE); }
-      }
+      if (r === 0 && c.sleepy) this.wake(c);
       const x = this.laneXs[l];
       const y = LANE_TOP + r * ROW_H;
       if (!c.sprite) {
-        c.sprite = this.add.image(x, y + (animate ? ROW_H : 0), c.sleepy ? 'critter_sleep' : critterKey(c.color)).setScale(LANE_SCALE).setDepth(8);
+        c.sprite = this.add.image(x, y + (animate ? ROW_H : 0), c.sleepy ? sleepKey() : critterKey(c.color)).setScale(LANE_SCALE).setDepth(8);
         if (animate) c.sprite.setAlpha(0);
       }
       if (animate) this.tweens.add({ targets: c.sprite, x, y, alpha: 1, duration: 220, ease: 'Back.easeOut' });
@@ -143,6 +169,43 @@ export class GameScene extends Phaser.Scene {
     });
     const hidden = lane.length - MAX_ROWS;
     this.laneBadges[l].setText(hidden > 0 ? `+${hidden}` : '');
+  }
+
+  wake(c) {
+    c.sleepy = false;
+    if (!c.sprite) return;
+    c.sprite.setTexture(critterKey(c.color));
+    this.squash(c.sprite, LANE_SCALE);
+  }
+
+  buildBoosters() {
+    this.boosterButtons = {};
+    BOOSTERS.forEach((b, i) => {
+      const x = GAME_W / 2 + (i - 1) * 170;
+      const btn = iconButton(this, x, BOOSTER_Y, b.icon, () => this.useBooster(b), { size: 108 }).setDepth(60);
+      const badge = this.add.graphics();
+      const count = this.add.text(38, -38, '', textStyle(26)).setOrigin(0.5);
+      btn.add([badge, count]);
+      btn.badge = badge;
+      btn.count = count;
+      this.boosterButtons[b.id] = btn;
+    });
+    this.refreshBoosters();
+  }
+
+  refreshBoosters() {
+    if (!this.boosterButtons) return;
+    const owned = loadSave().boosters;
+    BOOSTERS.forEach((b) => {
+      const btn = this.boosterButtons[b.id];
+      const n = owned[b.id];
+      btn.badge.clear().fillStyle(n > 0 ? 0xff7eb6 : 0x6fdc7a).fillCircle(38, -38, 22);
+      btn.count.setText(n > 0 ? String(n) : '+');
+    });
+    const grab = this.boosterButtons.grab;
+    this.tweens.killTweensOf(grab);
+    grab.setScale(1);
+    if (this.grabMode) this.tweens.add({ targets: grab, scale: 1.15, duration: 300, yoyo: true, repeat: -1 });
   }
 
   makeDock(color) {
@@ -215,6 +278,7 @@ export class GameScene extends Phaser.Scene {
         d.sprites.push(sp);
         d.filled++;
         sfx.land(seat);
+        haptics.buzz(10);
         this.puffs.setParticleTint(COLORS[c.color]);
         this.puffs.explode(8, to.x, to.y);
         this.squash(sp, SEAT_SCALE);
@@ -226,6 +290,7 @@ export class GameScene extends Phaser.Scene {
   departDock(d) {
     d.state = 'departing';
     sfx.cheer();
+    haptics.buzz(25);
     this.confetti.explode(36, d.x, d.y);
     const pop = this.add.text(d.x, d.y - 90, ['Yay!', 'Woo!', 'Nice!', 'Beep beep!'][Phaser.Math.Between(0, 3)], textStyle(40, '#ffffff')).setOrigin(0.5).setDepth(55);
     this.tweens.add({ targets: pop, y: pop.y - 70, alpha: 0, duration: 900, ease: 'Sine.easeOut', onComplete: () => pop.destroy() });
@@ -249,38 +314,62 @@ export class GameScene extends Phaser.Scene {
   // ---------- Input ----------
 
   onPointer(p) {
-    if (this.state !== 'playing' || p.y < LANE_TOP - 70) return;
+    if (this.state !== 'playing' || p.y < LANE_TOP - 70 || p.y > BOOSTER_Y - 70) return;
+    if (this.grabMode) {
+      this.tryGrab(p);
+      return;
+    }
     let best = -1;
     let bestDx = this.laneSpacing / 2 + 10;
     this.laneXs.forEach((x, l) => {
       const dx = Math.abs(p.x - x);
       if (dx < bestDx) { bestDx = dx; best = l; }
     });
-    if (best >= 0) this.tapLane(best);
+    if (best >= 0) this.sendToBelt(best, 0);
   }
 
-  tapLane(l) {
+  tryGrab(p) {
+    let hit = null;
+    let bestD = 56;
+    this.lanes.forEach((lane, l) => lane.forEach((c, r) => {
+      if (r >= MAX_ROWS || !c.sprite) return;
+      const dist = Phaser.Math.Distance.Between(p.x, p.y, c.sprite.x, c.sprite.y);
+      if (dist < bestD) { bestD = dist; hit = { l, r }; }
+    }));
+    if (!hit) return;
+    if (this.sendToBelt(hit.l, hit.r)) {
+      this.grabMode = false;
+      this.spendBooster('grab');
+      this.clearBanner();
+    }
+  }
+
+  // Moves the critter at row `r` of lane `l` onto the nearest free belt slot.
+  sendToBelt(l, r) {
     const lane = this.lanes[l];
-    if (!lane.length) return;
-    const c = lane[0];
+    const c = lane[r];
+    if (!c) return false;
     const free = this.slots.map((s, i) => (s.state === 'empty' ? i : -1)).filter((i) => i >= 0);
     if (!free.length) {
       sfx.buzz();
+      haptics.buzz(40);
       this.tweens.add({ targets: c.sprite, x: c.sprite.x + 10, duration: 50, yoyo: true, repeat: 3 });
-      return;
+      return false;
     }
     const target = free.reduce((a, b) => {
       const pa = this.slotPos(a), pb = this.slotPos(b);
       return Phaser.Math.Distance.Between(pb.x, pb.y, ENTRY.x, ENTRY.y) < Phaser.Math.Distance.Between(pa.x, pa.y, ENTRY.x, ENTRY.y) ? b : a;
     });
-    lane.shift();
+    lane.splice(r, 1);
+    if (c.sleepy) this.wake(c);
     const slot = this.slots[target];
     slot.state = 'incoming';
     slot.critter = c;
     const sp = c.sprite.setDepth(20);
+    this.tweens.killTweensOf(sp);
     const from = { x: sp.x, y: sp.y };
     sfx.hop();
-    this.hideTip();
+    this.hideHand();
     this.tweens.addCounter({
       from: 0, to: 1, duration: 320, ease: 'Sine.easeInOut',
       onUpdate: (tw) => {
@@ -297,6 +386,67 @@ export class GameScene extends Phaser.Scene {
       },
     });
     this.refreshLane(l, true);
+    return true;
+  }
+
+  // ---------- Boosters ----------
+
+  useBooster(b) {
+    if (this.state !== 'playing') return;
+    sfx.click();
+    if (b.id === 'grab' && this.grabMode) {
+      this.grabMode = false;
+      this.clearBanner();
+      this.refreshBoosters();
+      return;
+    }
+    if (loadSave().boosters[b.id] <= 0) {
+      this.offerBooster(b);
+      return;
+    }
+    if (b.id === 'slot') {
+      if (this.extraSlots >= MAX_EXTRA_SLOTS) return this.banner('Belt is as long as it gets!', '#ffffff');
+      this.addSlots(1);
+      this.spendBooster('slot');
+      sfx.magic();
+    } else if (b.id === 'wake') {
+      const sleepy = this.lanes.flat().filter((c) => c.sleepy);
+      if (!sleepy.length) return this.banner('Everyone is awake!', '#ffffff');
+      sleepy.forEach((c) => this.wake(c));
+      this.spendBooster('wake');
+      sfx.magic();
+    } else {
+      this.grabMode = true;
+      this.banner('Tap any critter!', '#ffffff', true);
+      this.refreshBoosters();
+    }
+  }
+
+  spendBooster(id) {
+    const save = loadSave();
+    writeSave({ boosters: { ...save.boosters, [id]: Math.max(0, save.boosters[id] - 1) } });
+    this.refreshBoosters();
+  }
+
+  grantBooster(id, cost = 0) {
+    const save = loadSave();
+    writeSave({ coins: save.coins - cost, boosters: { ...save.boosters, [id]: save.boosters[id] + 1 } });
+    this.refreshBoosters();
+  }
+
+  offerBooster(b) {
+    this.state = 'menu';
+    const resume = () => { this.closePanel(); this.state = 'playing'; };
+    const buttons = [['Watch ad: get 1', async () => {
+      this.closePanel();
+      if (await ads.rewarded(this)) { this.grantBooster(b.id); sfx.coin(); }
+      this.state = 'playing';
+    }, 0xffd447]];
+    if (loadSave().coins >= BOOSTER_PRICE) {
+      buttons.push([`Buy 1 for ${BOOSTER_PRICE} 🪙`, () => { this.grantBooster(b.id, BOOSTER_PRICE); sfx.coin(); resume(); }, 0x6fdc7a]);
+    }
+    buttons.push(['Not now', resume, 0xc9c4dc]);
+    this.panel = showPanel(this, { title: `${b.icon} ${b.name}`, subtitle: b.desc, buttons });
   }
 
   // ---------- Loop ----------
@@ -305,6 +455,7 @@ export class GameScene extends Phaser.Scene {
     if (this.state === 'playing') this.offset += this.lv.speed * (delta / 1000);
 
     const occupied = this.slots.filter((s) => s.state !== 'empty').length;
+    if (this.state === 'playing') this.peak = Math.max(this.peak, occupied);
     const free = this.slots.length - occupied;
     const danger = this.state === 'playing' && free <= 2;
     if (danger && !this.wasDanger) sfx.warn();
@@ -375,59 +526,133 @@ export class GameScene extends Phaser.Scene {
     if (!canMove) this.lose();
   }
 
+  // ---------- Pause ----------
+
+  pause() {
+    if (this.state !== 'playing') return;
+    sfx.click();
+    this.state = 'paused';
+    this.tweens.pauseAll();
+    ads.gameplayStop();
+    this.panel = showPanel(this, {
+      title: 'Paused',
+      contentH: 150,
+      content: (c, y) => addToggles(this, c, y + 60, [
+        ['🔊', '🔇', () => !sfx.isMuted(), () => !sfx.toggleMute()],
+        ['🎵', '🚫', music.isOn, music.toggle],
+        ['📳', '📴', haptics.isOn, haptics.toggle],
+      ]),
+      buttons: [
+        ['Resume', () => { this.closePanel(); this.tweens.resumeAll(); this.state = 'playing'; ads.gameplayStart(); }, 0x6fdc7a],
+        ['Restart', () => this.leave('Game', { level: this.levelNum }), 0xff7eb6],
+        ['Menu', () => this.leave('Menu'), 0x5fb4ff],
+      ],
+    });
+  }
+
+  leave(scene, data) {
+    this.tweens.resumeAll();
+    if (scene === 'Game') this.scene.restart(data);
+    else this.scene.start(scene, data);
+  }
+
   // ---------- Results ----------
 
   win() {
     this.state = 'won';
+    ads.gameplayStop();
     sfx.win();
-    const coins = 10 + this.slots.filter((s) => s.state === 'empty').length * 2;
+    const cap = this.slots.length;
+    const stars = this.peak <= cap - 3 ? 3 : this.peak <= cap - 1 ? 2 : 1;
+    let coins = 10 + stars * 5 + (this.lv.hard ? 10 : 0);
     const save = loadSave();
-    writeSave({ unlocked: Math.max(save.unlocked, Math.min(this.levelNum + 1, LEVEL_COUNT)), coins: save.coins + coins });
-    for (let k = 0; k < 4; k++) this.time.delayedCall(k * 180, () => this.confetti.explode(40, Phaser.Math.Between(100, GAME_W - 100), 300));
-    this.time.delayedCall(700, () => {
-      const buttons = [];
-      if (this.levelNum < LEVEL_COUNT) buttons.push(['Next Level', () => this.scene.restart({ level: this.levelNum + 1 }), 0x6fdc7a]);
-      buttons.push(['Menu', () => this.scene.start('Menu'), 0x5fb4ff]);
-      this.showPanel(this.levelNum < LEVEL_COUNT ? 'Level Complete!' : 'All levels done!', `+${coins} 🪙`, buttons);
+    writeSave({
+      unlocked: Math.max(save.unlocked, Math.min(this.levelNum + 1, LEVEL_COUNT)),
+      coins: save.coins + coins,
+      stars: { ...save.stars, [this.levelNum]: Math.max(stars, save.stars[this.levelNum] || 0) },
     });
+    for (let k = 0; k < 4; k++) this.time.delayedCall(k * 180, () => this.confetti.explode(40, Phaser.Math.Between(100, GAME_W - 100), 300));
+
+    const last = this.levelNum >= LEVEL_COUNT;
+    const show = (doubled) => {
+      this.closePanel();
+      const buttons = [];
+      if (!doubled) {
+        buttons.push(['Double coins (ad)', async () => {
+          this.closePanel();
+          if (await ads.rewarded(this)) {
+            writeSave({ coins: loadSave().coins + coins });
+            coins *= 2;
+            sfx.coin();
+          }
+          show(true);
+        }, 0xffd447]);
+      }
+      if (!last) {
+        buttons.push(['Next Level', async () => {
+          this.closePanel();
+          await ads.betweenLevels(this, this.levelNum);
+          this.scene.restart({ level: this.levelNum + 1 });
+        }, 0x6fdc7a]);
+      }
+      buttons.push(['Menu', () => this.scene.start('Menu'), 0x5fb4ff]);
+      this.panel = showPanel(this, {
+        title: last ? 'You beat them all!' : 'Level Complete!',
+        contentH: 170,
+        content: (c, y) => {
+          for (let k = 0; k < 3; k++) {
+            const s = this.add.text(GAME_W / 2 + (k - 1) * 110, y + 40, '★', textStyle(110, k < stars ? '#ffc83d' : '#e6dff0', '#6b3a6b', 8)).setOrigin(0.5);
+            c.add(s);
+            if (!doubled && k < stars) {
+              s.setScale(0);
+              this.tweens.add({ targets: s, scale: 1, duration: 300, delay: 200 + k * 220, ease: 'Back.easeOut', onStart: () => sfx.land(k) });
+            }
+          }
+          c.add(this.add.text(GAME_W / 2, y + 135, `+${coins} 🪙`, textStyle(40, '#ff9f45', '#ffffff', 0)).setOrigin(0.5));
+        },
+        buttons,
+      });
+    };
+    this.time.delayedCall(700, () => show(false));
   }
 
   lose() {
     this.state = 'lost';
+    ads.gameplayStop();
     sfx.lose();
+    haptics.buzz(200);
     this.cameras.main.shake(300, 0.01);
     this.time.delayedCall(700, () => {
       const buttons = [];
-      if (!this.usedExtraSlots) buttons.push(['+2 Slots (ad)', () => this.addSlots(2), 0xffd447]);
+      const owned = loadSave().boosters.slot;
+      if (owned > 0 && this.extraSlots < MAX_EXTRA_SLOTS) {
+        buttons.push([`Use ➕ Slot (${owned} left)`, () => { this.spendBooster('slot'); this.continueAfterJam(1); }, 0x6fdc7a]);
+      }
+      if (!this.usedRescue) {
+        buttons.push(['+2 Slots (ad)', async () => {
+          this.closePanel();
+          this.usedRescue = true;
+          if (await ads.rewarded(this)) this.continueAfterJam(2);
+          else this.lose();
+        }, 0xffd447]);
+      }
       buttons.push(['Retry', () => this.scene.restart({ level: this.levelNum }), 0xff7eb6]);
       buttons.push(['Menu', () => this.scene.start('Menu'), 0x5fb4ff]);
-      this.showPanel('Belt jammed!', 'The belt filled up.', buttons);
+      this.panel = showPanel(this, { title: 'Belt jammed!', subtitle: 'The belt filled up.', buttons });
     });
   }
 
-  // Rewarded-ad hook. In the prototype it grants the reward right away;
-  // the real build will show an ad first.
-  addSlots(n) {
-    this.usedExtraSlots = true;
+  continueAfterJam(n) {
     this.closePanel();
-    for (let k = 0; k < n; k++) this.slots.push({ critter: null, state: 'empty' });
+    this.addSlots(n);
     this.state = 'playing';
+    ads.gameplayStart();
+    sfx.magic();
   }
 
-  showPanel(title, subtitle, buttons) {
-    const c = this.add.container(0, 0).setDepth(100);
-    const dim = this.add.rectangle(GAME_W / 2, GAME_H / 2, GAME_W, GAME_H, 0x3a2a3a, 0.45).setInteractive();
-    const h = 260 + buttons.length * 120;
-    const top = GAME_H / 2 - h / 2;
-    const g = this.add.graphics();
-    g.fillStyle(0xffffff).fillRoundedRect(80, top, GAME_W - 160, h, 40);
-    const t = this.add.text(GAME_W / 2, top + 80, title, textStyle(56, '#ff7eb6', '#6b3a6b', 8)).setOrigin(0.5);
-    const s = this.add.text(GAME_W / 2, top + 160, subtitle, textStyle(36, '#6b3a6b', '#ffffff', 2)).setOrigin(0.5);
-    c.add([dim, g, t, s]);
-    buttons.forEach(([label, cb, color], i) => c.add(makeButton(this, GAME_W / 2, top + 270 + i * 120, label, cb, { w: 420, color })));
-    c.setAlpha(0);
-    this.tweens.add({ targets: c, alpha: 1, duration: 200 });
-    this.panel = c;
+  addSlots(n) {
+    this.extraSlots += n;
+    for (let k = 0; k < n; k++) this.slots.push({ critter: null, state: 'empty' });
   }
 
   closePanel() {
@@ -441,22 +666,31 @@ export class GameScene extends Phaser.Scene {
     this.tweens.add({ targets: sp, scaleX: base * 1.2, scaleY: base * 0.8, duration: 90, yoyo: true, onComplete: () => sp.setScale(base) });
   }
 
-  showTip(text) {
-    const c = this.add.container(GAME_W / 2, 1190).setDepth(70);
-    const t = this.add.text(0, 0, text, { ...textStyle(30, '#6b3a6b', '#ffffff', 0), align: 'center' }).setOrigin(0.5);
-    const g = this.add.graphics();
-    const w = t.width + 50, h = t.height + 30;
-    g.fillStyle(0xffffff, 0.95).fillRoundedRect(-w / 2, -h / 2, w, h, 24);
-    c.add([g, t]);
-    this.tweens.add({ targets: c, y: 1178, duration: 600, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
-    this.tip = c;
+  // Short message across the middle of the belt; `sticky` keeps it up until cleared.
+  banner(text, color, sticky = false) {
+    this.clearBanner();
+    const t = this.add.text(GAME_W / 2, 690, text, textStyle(40, color)).setOrigin(0.5).setDepth(90).setScale(0);
+    this.tweens.add({ targets: t, scale: 1, duration: 250, ease: 'Back.easeOut' });
+    if (!sticky) this.time.delayedCall(1400, () => this.tweens.add({ targets: t, alpha: 0, duration: 300, onComplete: () => t.destroy() }));
+    this.bannerText = t;
   }
 
-  hideTip() {
-    if (!this.tip) return;
-    const tip = this.tip;
-    this.tip = null;
-    this.tweens.killTweensOf(tip);
-    this.tweens.add({ targets: tip, alpha: 0, duration: 250, onComplete: () => tip.destroy() });
+  clearBanner() {
+    if (this.bannerText && this.bannerText.active) this.bannerText.destroy();
+    this.bannerText = null;
+  }
+
+  // First-level hint: a hand tapping the line whose front critter has a bus waiting.
+  showHand() {
+    const ready = this.docks.map((d) => d.color);
+    const l = Math.max(0, this.lanes.findIndex((lane) => lane[0] && ready.includes(lane[0].color)));
+    this.hand = this.add.text(this.laneXs[l] + 20, LANE_TOP + 60, '👆', { fontSize: '72px' }).setOrigin(0.5).setDepth(95);
+    this.tweens.add({ targets: this.hand, y: LANE_TOP + 30, duration: 450, yoyo: true, repeat: -1, ease: 'Sine.easeInOut' });
+  }
+
+  hideHand() {
+    if (!this.hand) return;
+    this.hand.destroy();
+    this.hand = null;
   }
 }

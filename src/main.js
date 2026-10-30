@@ -2,6 +2,8 @@ import Phaser from 'phaser';
 import { BootScene } from './scenes/BootScene.js';
 import { MenuScene } from './scenes/MenuScene.js';
 import { GameScene } from './scenes/GameScene.js';
+import { LevelSelectScene } from './scenes/LevelSelectScene.js';
+import { ClosetScene } from './scenes/ClosetScene.js';
 import { GAME_W, GAME_H } from './layout.js';
 
 const game = new Phaser.Game({
@@ -14,7 +16,7 @@ const game = new Phaser.Game({
     width: GAME_W,
     height: GAME_H,
   },
-  scene: [BootScene, MenuScene, GameScene],
+  scene: [BootScene, MenuScene, LevelSelectScene, ClosetScene, GameScene],
 });
 
 // Handy for debugging from the browser console and for automated playtests.
